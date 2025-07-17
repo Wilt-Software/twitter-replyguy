@@ -3,7 +3,8 @@ class TwitterAIReplyGuy {
     this.apiKey = '';
     this.geminiApiKey = '';
     this.debounceTimeout = null;
-    this.processedTweets = new Set();
+    this.processedTweets = new Set(); // Tracks tweets with AI buttons added
+    this.machineGunProcessedTweets = new Set(); // Tracks tweets actually processed by Machine Gun Mode
     this.machineGunMode = false;
     this.machineGunInterval = null;
     this.machineGunQueue = [];
@@ -14,6 +15,7 @@ class TwitterAIReplyGuy {
     this.processedInSession = 0;
     this.machineGunStats = null;
     this.startTime = null;
+    this.statsInterval = null;
     this.init();
   }
 
@@ -253,8 +255,6 @@ class TwitterAIReplyGuy {
     }
 
     console.log('AI button clicked for URL:', tweetUrl);
-    const perfMon = window.performanceMonitor;
-    perfMon?.startTimer('total_operation');
 
     const button = tweetElement.querySelector('.ai-reply-button');
     if (button) {
@@ -263,53 +263,21 @@ class TwitterAIReplyGuy {
     }
 
     try {
-      // STEP 1: Generate AI reply FIRST (before opening compose box)
       console.log('Fetching tweet data...');
-      perfMon?.startTimer('tweet_fetch');
       const tweetData = await this.fetchTweetData(tweetUrl);
-      const fetchDuration = perfMon?.endTimer('tweet_fetch', { url: tweetUrl });
-      console.log(`PERF: Tweet data fetch took: ${fetchDuration?.toFixed(2)}ms`);
-      
       console.log('Tweet data received, generating reply...');
-      perfMon?.startTimer('ai_generation');
       const aiReply = await this.generateReply(tweetData);
-      const replyDuration = perfMon?.endTimer('ai_generation', { replyLength: aiReply?.length });
-      console.log(`PERF: AI reply generation took: ${replyDuration?.toFixed(2)}ms`);
       console.log('AI reply generated successfully:', aiReply);
       
-      // STEP 2: Extract tweet ID for targeting
       const tweetId = this.extractTweetIdFromElement(tweetElement);
       if (!tweetId) {
         throw new Error('Could not extract tweet ID');
       }
       
-      // STEP 3: Now open compose box and paste the pre-generated reply
       console.log('Opening compose box and inserting pre-generated reply...');
-      perfMon?.startTimer('ui_manipulation');
       await this.replyToTweetWithGeneratedText(tweetId, aiReply, tweetElement);
-      const uiDuration = perfMon?.endTimer('ui_manipulation', { tweetId, replyLength: aiReply?.length });
-      
-      const totalDuration = perfMon?.endTimer('total_operation', { 
-        tweetUrl, 
-        success: true,
-        fetchDuration,
-        replyDuration,
-        uiDuration
-      });
-      
-      console.log(`PERF: UI manipulation took: ${uiDuration?.toFixed(2)}ms`);
-      console.log(`PERF: Total operation took: ${totalDuration?.toFixed(2)}ms`);
-      
-      if (fetchDuration && replyDuration && uiDuration && totalDuration) {
-        console.log(`PERF BREAKDOWN:`);
-        console.log(`  - Tweet fetch: ${fetchDuration.toFixed(2)}ms (${(fetchDuration / totalDuration * 100).toFixed(1)}%)`);
-        console.log(`  - AI generation: ${replyDuration.toFixed(2)}ms (${(replyDuration / totalDuration * 100).toFixed(1)}%)`);
-        console.log(`  - UI manipulation: ${uiDuration.toFixed(2)}ms (${(uiDuration / totalDuration * 100).toFixed(1)}%)`);  
-      }
       
     } catch (error) {
-      perfMon?.recordError('total_operation', error);
-      perfMon?.endTimer('total_operation', { success: false, error: error.message });
       console.error('Error generating AI reply:', error);
       
       let errorMessage = 'Error generating AI reply: ';
@@ -329,25 +297,19 @@ class TwitterAIReplyGuy {
         errorMessage += error.message;
       }
       
+      // Only show alert if not in machine gun mode
       if (!this.machineGunMode) {
         alert(errorMessage);
+      } else {
+        console.error('Machine Gun Mode Error:', errorMessage);
       }
+      
+      // Re-throw error so machine gun mode can handle it
+      throw error;
     } finally {
       if (button) {
         button.classList.remove('loading');
         button.disabled = false;
-      }
-      
-      // Log performance summary periodically
-      if (Math.random() < 0.1) { // 10% chance to log summary
-        const summary = perfMon?.getMetricsSummary();
-        if (summary) {
-          console.log('📊 PERFORMANCE SUMMARY:', summary);
-          const slowOps = perfMon?.getSlowOperations(500); // Operations > 500ms
-          if (slowOps?.length > 0) {
-            console.warn('⚠️  SLOW OPERATIONS DETECTED:', slowOps);
-          }
-        }
       }
     }
   }
@@ -421,10 +383,7 @@ class TwitterAIReplyGuy {
     console.log(`Opening reply compose for tweet ${tweetId} with text:`, replyText);
 
     try {
-      const buttonFindStart = performance.now();
       const replyButton = this.findReplyButton(tweetElement);
-      const buttonFindEnd = performance.now();
-      console.log(`PERF: Finding reply button took: ${(buttonFindEnd - buttonFindStart).toFixed(2)}ms`);
       
       if (!replyButton) {
         throw new Error('Could not find reply button for this tweet');
@@ -432,23 +391,121 @@ class TwitterAIReplyGuy {
 
       // Click the reply button to open the compose modal
       console.log('Clicking reply button...');
-      const clickStart = performance.now();
       replyButton.click();
-      const clickEnd = performance.now();
-      console.log(`PERF: Button click took: ${(clickEnd - clickStart).toFixed(2)}ms`);
 
       // Wait for the compose modal to appear and then insert the text
-      const modalWaitStart = performance.now();
       await this.waitForComposeModalAndInsertText(replyText, tweetElement);
-      const modalWaitEnd = performance.now();
-      console.log(`PERF: Modal wait and text insertion took: ${(modalWaitEnd - modalWaitStart).toFixed(2)}ms`);
       console.log('AI reply successfully inserted into the correct compose box!');
+
+      // If in machine gun mode, automatically submit the reply
+      if (this.machineGunMode) {
+        console.log('Machine gun mode: automatically submitting reply...');
+        await this.submitReply();
+      }
 
     } catch (error) {
       console.error('Error replying to tweet:', error);
       // Fallback: open Twitter intent URL
-      window.open(`https://x.com/intent/tweet?in_reply_to=${tweetId}&text=${encodeURIComponent(replyText)}`, '_blank');
+      if (!this.machineGunMode) {
+        window.open(`https://x.com/intent/tweet?in_reply_to=${tweetId}&text=${encodeURIComponent(replyText)}`, '_blank');
+      }
+      throw error; // Re-throw for machine gun mode error handling
     }
+  }
+
+  async submitReply() {
+    // Wait 1 second after pasting as requested
+    console.log('Waiting 1 second after pasting before clicking Reply...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    return new Promise((resolve, reject) => {
+      let attempts = 0;
+      const maxAttempts = 10; // 1 second with 100ms intervals
+      
+      const findAndClickReplyButton = () => {
+        attempts++;
+        console.log(`Attempt ${attempts}: Looking for Reply button...`);
+        
+        // Strategy 1: Find button by data-testid="tweetButton" that contains "Reply" text
+        const tweetButtons = document.querySelectorAll('button[data-testid="tweetButton"]');
+        let replyButton = null;
+        
+        for (const button of tweetButtons) {
+          if (button.textContent.includes('Reply')) {
+            replyButton = button;
+            console.log('Found Reply button by data-testid="tweetButton"');
+            break;
+          }
+        }
+        
+        // Strategy 2: Find button with the exact class structure
+        if (!replyButton) {
+          const buttons = document.querySelectorAll('button.css-175oi2r.r-sdzlij.r-1phboty.r-rs99b7.r-lrvibr.r-1cwvpvk.r-2yi16.r-1qi8awa.r-3pj75a.r-1loqt21.r-o7ynqc.r-6416eg.r-1ny4l3l');
+          for (const button of buttons) {
+            if (button.textContent.includes('Reply')) {
+              replyButton = button;
+              console.log('Found Reply button by exact class match');
+              break;
+            }
+          }
+        }
+        
+        // Strategy 3: Find any button containing "Reply" text
+        if (!replyButton) {
+          const allButtons = document.querySelectorAll('button');
+          for (const button of allButtons) {
+            if (button.textContent.trim() === 'Reply') {
+              replyButton = button;
+              console.log('Found Reply button by text content');
+              break;
+            }
+          }
+        }
+        
+        // Strategy 4: Find button containing the specific span structure
+        if (!replyButton) {
+          const replySpans = document.querySelectorAll('span.css-1jxf684.r-bcqeeo.r-1ttztb7.r-qvutc0.r-poiln3');
+          for (const span of replySpans) {
+            if (span.textContent.trim() === 'Reply') {
+              // Walk up to find the button
+              let parent = span.parentElement;
+              while (parent && parent !== document.body) {
+                if (parent.tagName === 'BUTTON') {
+                  replyButton = parent;
+                  console.log('Found Reply button by walking up from span');
+                  break;
+                }
+                parent = parent.parentElement;
+              }
+              if (replyButton) break;
+            }
+          }
+        }
+        
+        if (replyButton) {
+          console.log('Found reply submit button, clicking...');
+          replyButton.click();
+          
+          console.log('Reply submitted successfully!');
+          resolve();
+          return;
+        }
+        
+        if (attempts >= maxAttempts) {
+          console.log('Could not find reply submit button within timeout');
+          console.log('Available buttons:', document.querySelectorAll('button').length);
+          console.log('Buttons with tweetButton testid:', document.querySelectorAll('button[data-testid="tweetButton"]').length);
+          reject(new Error('Reply submit button not found'));
+          return;
+        }
+        
+        // Wait and try again
+        setTimeout(findAndClickReplyButton, 100);
+      };
+      
+      // Start searching for the reply button
+      findAndClickReplyButton();
+    });
   }
 
   findReplyButton(tweetElement) {
@@ -496,176 +553,209 @@ class TwitterAIReplyGuy {
   async waitForComposeModalAndInsertText(replyText, tweetElement) {
     return new Promise((resolve, reject) => {
       let attempts = 0;
-      const maxAttempts = 30; // 3 seconds with 100ms intervals
+      const maxAttempts = 50; // 5 seconds timeout
       
-      const findAndInsertText = () => {
-        attempts++;
+      const interval = setInterval(() => {
+        console.log(`Attempt ${attempts + 1}: Looking for reply compose editor...`);
         
-        // Look for reply dialog that appears after clicking reply
-        const replyDialogs = document.querySelectorAll('[role="dialog"]');
-        let activeReplyDialog = null;
+        // Strategy 1: Look for the editor directly by data-testid (most reliable)
+        let editor = document.querySelector('[data-testid="tweetTextarea_0"]');
         
-        // Find the dialog that contains "Replying to" text
-        for (const dialog of replyDialogs) {
-          const replyingToText = dialog.textContent.toLowerCase().includes('replying to');
-          if (replyingToText) {
-            activeReplyDialog = dialog;
-            break;
-          }
-        }
-        
-        // If no dialog found, look for the most recent dialog
-        if (!activeReplyDialog && replyDialogs.length > 0) {
-          activeReplyDialog = replyDialogs[replyDialogs.length - 1];
-        }
-        
-        if (activeReplyDialog) {
-          console.log('Found active reply dialog, looking for Draft.js editor...');
-          
-          // Strategy 1: Look for Draft.js editor div with data-offset-key
-          const draftEditor = activeReplyDialog.querySelector('[data-offset-key]');
-          const draftEditorParent = activeReplyDialog.querySelector('.public-DraftEditor-content');
-          
-          // Strategy 2: Look for the textarea within the dialog
-          const textarea = activeReplyDialog.querySelector('[data-testid="tweetTextarea_0"]');
-          
-          if (draftEditor) {
-            console.log('Found Draft.js editor, inserting text...');
-            
-            // Focus on the editor
-            if (textarea) {
-              textarea.focus();
+        if (!editor) {
+          // Strategy 2: Look for editor within any dialog
+          const dialogs = document.querySelectorAll('[role="dialog"]');
+          for (const dialog of dialogs) {
+            editor = dialog.querySelector('[data-testid="tweetTextarea_0"]');
+            if (editor) {
+              console.log('Found editor in dialog');
+              break;
             }
-            
-            // Insert text into Draft.js editor
-            this.insertTextIntoDraftEditor(draftEditor, replyText, textarea);
-            
-            console.log('Text inserted into Draft.js editor successfully!');
-            resolve();
-            return;
-          } else if (textarea) {
-            console.log('Found textarea fallback, inserting text...');
-            
-            // Fallback to textarea method
-            this.insertTextIntoTextarea(textarea, replyText);
-            
-            console.log('Text inserted into textarea successfully!');
-            resolve();
-            return;
           }
         }
         
-        if (attempts >= maxAttempts) {
-          reject(new Error('Reply compose modal did not appear within timeout'));
+        if (!editor) {
+          // Strategy 3: Look for editor within rich text input container
+          const container = document.querySelector('[data-testid="tweetTextarea_0RichTextInputContainer"]');
+          if (container) {
+            editor = container.querySelector('[data-testid="tweetTextarea_0"]');
+            if (editor) {
+              console.log('Found editor in rich text container');
+            }
+          }
+        }
+        
+        if (!editor) {
+          // Strategy 4: Look for any contenteditable element that looks like a tweet compose box
+          const contentEditables = document.querySelectorAll('[contenteditable="true"]');
+          for (const el of contentEditables) {
+            if (el.getAttribute('aria-label') && el.getAttribute('aria-label').toLowerCase().includes('post')) {
+              editor = el;
+              console.log('Found editor by aria-label');
+              break;
+            }
+          }
+        }
+        
+        if (editor) {
+          console.log('Found compose editor, inserting text...');
+          console.log('Editor element:', editor);
+          clearInterval(interval);
+          
+          try {
+            this.insertTextIntoComposeBox(editor, replyText);
+            console.log('Text insertion completed successfully');
+            resolve();
+          } catch (error) {
+            console.error('Error during text insertion:', error);
+            reject(error);
+          }
           return;
         }
         
-        // Wait and try again
-        setTimeout(findAndInsertText, 100);
-      };
-      
-      // Start searching for the compose modal
-      findAndInsertText();
+        attempts++;
+        if (attempts >= maxAttempts) {
+          clearInterval(interval);
+          console.error('Failed to find reply compose editor after', maxAttempts, 'attempts');
+          console.log('Available dialogs:', document.querySelectorAll('[role="dialog"]').length);
+          console.log('Available contenteditable elements:', document.querySelectorAll('[contenteditable="true"]').length);
+          reject(new Error('Reply compose modal did not appear or editor not found.'));
+        }
+      }, 100);
     });
   }
 
-  insertTextIntoDraftEditor(draftEditor, replyText, textarea) {
-    // Clear existing content
-    draftEditor.innerHTML = '';
+  insertTextIntoComposeBox(editor, text) {
+    console.log('Inserting text into compose box:', text);
+    console.log('Editor type:', editor.tagName, 'contenteditable:', editor.contentEditable);
     
-    // Create a new text node with the reply text
-    const textSpan = document.createElement('span');
-    textSpan.setAttribute('data-text', 'true');
-    textSpan.textContent = replyText;
+    try {
+      // 1. Focus the editor element first
+      editor.focus();
+      console.log('Editor focused');
+      
+      // 2. Work with existing Draft.js structure instead of clearing it
+      console.log('Working with existing Draft.js structure...');
+      
+      // Find the existing data-contents container
+      let contentsContainer = editor.querySelector('[data-contents="true"]');
+      if (contentsContainer) {
+        console.log('Found existing data-contents container');
+        
+        // Find the existing text span
+        const existingTextSpan = contentsContainer.querySelector('[data-text="true"]');
+        if (existingTextSpan) {
+          console.log('Found existing text span, replacing content');
+          existingTextSpan.textContent = text;
+        } else {
+          console.log('No existing text span, creating new structure');
+          this.createDraftJsStructure(contentsContainer, text);
+        }
+      } else {
+        console.log('No data-contents container found, using direct insertion');
+        
+        // Fallback: Select all and replace with execCommand
+        const range = document.createRange();
+        const selection = window.getSelection();
+        
+        // Select all content in the editor
+        range.selectNodeContents(editor);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        
+        // Use execCommand to replace selected content
+        const execResult = document.execCommand('insertText', false, text);
+        console.log('execCommand result:', execResult);
+      }
+      
+      // 3. Dispatch minimal events to avoid breaking React state
+      console.log('Dispatching minimal validation events...');
+      
+      // Only dispatch the most essential event
+      const inputEvent = new Event('input', { 
+        bubbles: true, 
+        cancelable: true
+      });
+      
+      editor.dispatchEvent(inputEvent);
+      
+      // Small delay for React to process
+      setTimeout(() => {
+        const changeEvent = new Event('change', { bubbles: true });
+        editor.dispatchEvent(changeEvent);
+        console.log('Essential events dispatched');
+      }, 50);
+      
+      // 4. Verify the text was actually inserted
+      setTimeout(() => {
+        const currentContent = editor.textContent || editor.innerText;
+        if (currentContent && currentContent.includes(text.substring(0, 20))) {
+          console.log('✅ Text insertion verified successful');
+          console.log('Content length:', currentContent.length);
+        } else {
+          console.warn('⚠️ Text insertion verification unclear');
+          console.log('Expected text start:', text.substring(0, 20));
+          console.log('Actual content:', currentContent ? currentContent.substring(0, 50) : 'empty');
+        }
+      }, 100);
+      
+      console.log('Text insertion process completed');
+      
+    } catch (error) {
+      console.error('Error in insertTextIntoComposeBox:', error);
+      throw error;
+    }
+  }
+
+  createDraftJsStructure(contentsContainer, text) {
+    console.log('Creating proper Draft.js structure');
     
-    // Create the Draft.js structure
+    // Clear the container
+    contentsContainer.innerHTML = '';
+    
+    // Get a unique editor ID
+    const editorId = 'ai-editor-' + Math.random().toString(36).substr(2, 5);
+    
+    // Create the proper Draft.js block structure
+    const blockWrapper = document.createElement('div');
+    blockWrapper.className = '';
+    blockWrapper.setAttribute('data-block', 'true');
+    blockWrapper.setAttribute('data-editor', editorId);
+    blockWrapper.setAttribute('data-offset-key', editorId + '-0-0');
+    
     const blockDiv = document.createElement('div');
+    blockDiv.setAttribute('data-offset-key', editorId + '-0-0');
     blockDiv.className = 'public-DraftStyleDefault-block public-DraftStyleDefault-ltr';
-    blockDiv.setAttribute('data-offset-key', 'reply-0-0');
     
     const spanWrapper = document.createElement('span');
-    spanWrapper.setAttribute('data-offset-key', 'reply-0-0');
+    spanWrapper.setAttribute('data-offset-key', editorId + '-0-0');
+    
+    const textSpan = document.createElement('span');
+    textSpan.setAttribute('data-text', 'true');
+    textSpan.textContent = text;
+    
     spanWrapper.appendChild(textSpan);
-    
     blockDiv.appendChild(spanWrapper);
-    draftEditor.appendChild(blockDiv);
+    blockWrapper.appendChild(blockDiv);
+    contentsContainer.appendChild(blockWrapper);
     
-    // Also set the textarea value if available
-    if (textarea) {
-      textarea.value = replyText;
-      textarea.textContent = replyText;
-      
-      // Trigger events on the textarea
-      const events = ['input', 'change', 'keyup', 'keydown'];
-      events.forEach(eventType => {
-        const event = new Event(eventType, { bubbles: true });
-        textarea.dispatchEvent(event);
-      });
-    }
-    
-    // Focus and trigger events on the Draft editor
-    draftEditor.focus();
-    
-    // Trigger input events on the Draft editor
-    const inputEvent = new Event('input', { bubbles: true });
-    const changeEvent = new Event('change', { bubbles: true });
-    const keyupEvent = new KeyboardEvent('keyup', { bubbles: true });
-    
-    draftEditor.dispatchEvent(inputEvent);
-    draftEditor.dispatchEvent(changeEvent);
-    draftEditor.dispatchEvent(keyupEvent);
-    
-    // Try to trigger React's synthetic events
-    const reactEvents = ['onInput', 'onChange', 'onKeyUp'];
-    reactEvents.forEach(eventName => {
-      if (draftEditor[eventName]) {
-        draftEditor[eventName]({ target: draftEditor });
-      }
-    });
+    console.log('Draft.js structure created');
   }
 
-  insertTextIntoTextarea(textarea, replyText) {
-    // Focus the textarea
-    textarea.focus();
-    
-    // Clear existing content
-    textarea.value = '';
-    textarea.textContent = '';
-    textarea.innerHTML = '';
-    
-    // Insert the text using multiple methods
-    textarea.value = replyText;
-    textarea.textContent = replyText;
-    
-    // Use document.execCommand as fallback
-    document.execCommand('selectAll', false, null);
-    document.execCommand('insertText', false, replyText);
-    
-    // Trigger comprehensive events
-    const events = [
-      'input', 'change', 'keyup', 'keydown', 'keypress',
-      'focus', 'blur', 'compositionend'
-    ];
-    
-    events.forEach(eventType => {
-      const event = new Event(eventType, { bubbles: true });
-      textarea.dispatchEvent(event);
-    });
-    
-    // Trigger keyboard events that might trigger React handlers
-    const keyboardEvents = ['keyup', 'keydown'];
-    keyboardEvents.forEach(eventType => {
-      const event = new KeyboardEvent(eventType, { 
-        bubbles: true, 
-        key: 'Enter', 
-        code: 'Enter',
-        charCode: 13,
-        keyCode: 13,
-        which: 13
+  hidePlaceholder(editor) {
+    // Find and hide any placeholder elements
+    try {
+      const placeholders = document.querySelectorAll('.public-DraftEditorPlaceholder-root, [class*="placeholder"]');
+      placeholders.forEach(placeholder => {
+        if (placeholder.style) {
+          placeholder.style.display = 'none';
+        }
       });
-      textarea.dispatchEvent(event);
-    });
+      console.log('Placeholder elements hidden:', placeholders.length);
+    } catch (error) {
+      console.warn('Could not hide placeholder:', error);
+    }
   }
+
 
   showApiKeyModal() {
     const modal = document.createElement('div');
@@ -716,13 +806,13 @@ class TwitterAIReplyGuy {
   }
 
   createMachineGunButton() {
-    // Remove existing elements if they exist
+    // Remove existing elements if they exist to prevent duplicates
     const existingButton = document.querySelector('.machine-gun-button');
     const existingStats = document.querySelector('.machine-gun-stats');
     if (existingButton) existingButton.remove();
     if (existingStats) existingStats.remove();
 
-    // Create the machine gun mode button
+    // Create the "Machine Gun Mode" button
     const button = document.createElement('button');
     button.className = 'machine-gun-button';
     button.innerHTML = '🔫 Machine Gun Mode: OFF';
@@ -750,14 +840,14 @@ class TwitterAIReplyGuy {
     document.body.appendChild(button);
     this.machineGunButton = button;
     
-    // Create stats display
+    // Create the stats display element
     this.createStatsDisplay();
   }
   
   createStatsDisplay() {
     const stats = document.createElement('div');
     stats.className = 'machine-gun-stats';
-    stats.style.display = 'none';
+    stats.style.display = 'none'; // Initially hidden
     stats.innerHTML = `
       <div><strong>🔫 Machine Gun Stats</strong></div>
       <div>Processed: <span id="mg-processed">0</span>/${this.maxTweetsPerSession}</div>
@@ -796,6 +886,26 @@ class TwitterAIReplyGuy {
     }
   }
 
+  addMachineGunStyles() {
+    const styleId = 'machine-gun-styles';
+    if (document.getElementById(styleId)) return;
+    
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = `
+      @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+        100% { transform: scale(1); }
+      }
+      .machine-gun-processing {
+        animation: pulse 1s infinite;
+        opacity: 0.7;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
   async startMachineGunMode() {
     console.log('🔫 Starting Machine Gun Mode...');
     
@@ -806,18 +916,24 @@ class TwitterAIReplyGuy {
       return;
     }
 
-    // Reset session counters
+    // Reset session counters and clear Machine Gun processed tweets
     this.processedInSession = 0;
     this.machineGunQueue = [];
+    this.machineGunProcessedTweets.clear(); // Clear only Machine Gun processed tweets
     this.startTime = Date.now();
+    
+    console.log('📋 Cleared Machine Gun processed tweets set and reset counters');
+    console.log(`📋 Keeping ${this.processedTweets.size} tweets with AI buttons`);
     
     // Show stats display
     if (this.machineGunStats) {
       this.machineGunStats.style.display = 'block';
     }
     
-    // Add CSS animation for pulsing effect
     this.addMachineGunStyles();
+    
+    // Initial population of the queue
+    this.populateQueue();
     
     // Start the processing loop
     this.machineGunInterval = setInterval(() => {
@@ -828,9 +944,6 @@ class TwitterAIReplyGuy {
     this.statsInterval = setInterval(() => {
       this.updateStats();
     }, 1000);
-    
-    // Initial population of queue
-    this.populateQueue();
   }
 
   stopMachineGunMode() {
@@ -854,7 +967,6 @@ class TwitterAIReplyGuy {
     this.machineGunQueue = [];
     this.isProcessing = false;
     
-    // Remove processing indicators from any remaining tweets
     document.querySelectorAll('.machine-gun-processing').forEach(tweet => {
       tweet.classList.remove('machine-gun-processing');
     });
@@ -862,60 +974,71 @@ class TwitterAIReplyGuy {
     console.log(`Machine Gun Mode stopped. Processed ${this.processedInSession} tweets this session.`);
   }
 
-  addMachineGunStyles() {
-    const styleId = 'machine-gun-styles';
-    if (document.getElementById(styleId)) return;
-    
-    const style = document.createElement('style');
-    style.id = styleId;
-    style.textContent = `
-      @keyframes pulse {
-        0% { transform: scale(1); }
-        50% { transform: scale(1.05); }
-        100% { transform: scale(1); }
-      }
-      .machine-gun-processing {
-        animation: pulse 1s infinite;
-        opacity: 0.7;
-      }
-    `;
-    document.head.appendChild(style);
-  }
-
   populateQueue() {
     const tweets = document.querySelectorAll('[data-testid="tweet"]');
     console.log(`🔍 Found ${tweets.length} tweets to evaluate for machine gun mode`);
+    console.log(`📋 Tweets with AI buttons: ${this.processedTweets.size}`);
+    console.log(`📋 Machine Gun processed tweets: ${this.machineGunProcessedTweets.size}`);
     
-    tweets.forEach((tweet) => {
+    let addedCount = 0;
+    let skippedCount = 0;
+    
+    tweets.forEach((tweet, index) => {
+      console.log(`🔍 Evaluating tweet ${index + 1}/${tweets.length}...`);
+      
       const tweetId = this.getTweetId(tweet);
-      if (!tweetId) return;
+      console.log(`  - Tweet ID: ${tweetId || 'NO_ID'}`);
       
-      // Skip if already processed
-      if (this.processedTweets.has(tweetId)) return;
+      if (!tweetId) {
+        console.log('  ⚠️ No tweet ID found, skipping');
+        skippedCount++;
+        return;
+      }
       
-      // Skip if already has AI button or is processing
-      if (tweet.querySelector('.ai-reply-button') || tweet.classList.contains('machine-gun-processing')) return;
+      // Skip if already processed by Machine Gun Mode
+      if (this.machineGunProcessedTweets.has(tweetId)) {
+        console.log(`  ⚠️ Tweet ${tweetId} already processed by Machine Gun Mode, skipping`);
+        skippedCount++;
+        return;
+      }
       
-      // Skip if can't extract URL
+      // Skip if currently being processed
+      if (tweet.classList.contains('machine-gun-processing')) {
+        console.log(`  ⚠️ Tweet ${tweetId} currently being processed, skipping`);
+        skippedCount++;
+        return;
+      }
+      
       const tweetUrl = this.extractTweetUrl(tweet);
-      if (!tweetUrl) return;
+      console.log(`  - Tweet URL: ${tweetUrl || 'NO_URL'}`);
       
-      // Add to queue
+      if (!tweetUrl) {
+        console.log(`  ⚠️ No tweet URL found for ${tweetId}, skipping`);
+        skippedCount++;
+        return;
+      }
+      
+      // Add to queue - now we can process tweets that have AI buttons
       this.machineGunQueue.push({
         tweetId,
         tweetUrl,
         tweetElement: tweet,
         addedAt: Date.now()
       });
+      
+      console.log(`  ✅ Added tweet ${tweetId} to queue (URL: ${tweetUrl})`);
+      addedCount++;
     });
     
-    console.log(`📋 Added ${this.machineGunQueue.length} tweets to machine gun queue`);
+    console.log(`📋 Queue population complete: ${addedCount} added, ${skippedCount} skipped. Total in queue: ${this.machineGunQueue.length}`);
   }
 
   async processMachineGunQueue() {
-    if (!this.machineGunMode || this.isProcessing) return;
+    if (!this.machineGunMode || this.isProcessing) {
+      console.log(`⚠️ Skipping queue processing: machineGunMode=${this.machineGunMode}, isProcessing=${this.isProcessing}`);
+      return;
+    }
     
-    // Check session limits
     if (this.processedInSession >= this.maxTweetsPerSession) {
       console.log('⚠️ Reached maximum tweets per session. Stopping machine gun mode.');
       this.stopMachineGunMode();
@@ -924,19 +1047,25 @@ class TwitterAIReplyGuy {
       return;
     }
     
-    // Get next tweet from queue
+    console.log(`🔍 Processing queue... Current queue size: ${this.machineGunQueue.length}`);
+    
     const nextTweet = this.machineGunQueue.shift();
     
     if (!nextTweet) {
-      console.log('📋 Queue empty, scrolling for more tweets...');
-      await this.scrollForMoreTweets();
+      console.log('📋 Queue empty, repopulating queue first...');
       this.populateQueue();
+      
+      // If still empty after repopulation, scroll for more
+      if (this.machineGunQueue.length === 0) {
+        console.log('📋 Queue still empty after repopulation, scrolling for more tweets...');
+        await this.scrollForMoreTweets();
+        this.populateQueue();
+      }
       return;
     }
     
-    // Skip if tweet element is no longer in DOM
-    if (!document.contains(nextTweet.tweetElement)) {
-      console.log('🗑️ Tweet element no longer in DOM, skipping...');
+    if (!document.body.contains(nextTweet.tweetElement)) {
+      console.log(`🗑️ Tweet element ${nextTweet.tweetId} no longer in DOM, skipping...`);
       return;
     }
     
@@ -944,19 +1073,19 @@ class TwitterAIReplyGuy {
     
     try {
       console.log(`🎯 Processing tweet ${this.processedInSession + 1}/${this.maxTweetsPerSession}: ${nextTweet.tweetId}`);
-      
-      // Mark as processing
       nextTweet.tweetElement.classList.add('machine-gun-processing');
       
-      // Process the tweet
       await this.handleAIButtonClick(nextTweet.tweetUrl, nextTweet.tweetElement);
       
       this.processedInSession++;
+      this.machineGunProcessedTweets.add(nextTweet.tweetId);
+      console.log(`✅ Successfully processed tweet ${nextTweet.tweetId}`);
       
     } catch (error) {
-      console.error('❌ Error processing tweet in machine gun mode:', error);
+      console.error(`❌ Error processing tweet ${nextTweet.tweetId}:`, error);
+      // Still mark as processed to avoid retrying
+      this.machineGunProcessedTweets.add(nextTweet.tweetId);
     } finally {
-      // Remove processing indicator
       nextTweet.tweetElement.classList.remove('machine-gun-processing');
       this.isProcessing = false;
     }
@@ -969,47 +1098,28 @@ class TwitterAIReplyGuy {
     const minutes = Math.floor(runtime / 60000);
     const seconds = Math.floor((runtime % 60000) / 1000);
     
-    const processedEl = document.getElementById('mg-processed');
-    const queueEl = document.getElementById('mg-queue');
-    const runtimeEl = document.getElementById('mg-runtime');
-    const rateEl = document.getElementById('mg-rate');
-    
-    if (processedEl) processedEl.textContent = this.processedInSession;
-    if (queueEl) queueEl.textContent = this.machineGunQueue.length;
-    if (runtimeEl) runtimeEl.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-    if (rateEl) rateEl.textContent = `${this.rateLimitDelay/1000}s`;
+    document.getElementById('mg-processed').textContent = this.processedInSession;
+    document.getElementById('mg-queue').textContent = this.machineGunQueue.length;
+    document.getElementById('mg-runtime').textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   }
 
   async scrollForMoreTweets() {
     console.log('📜 Scrolling for more tweets...');
-    
     const beforeScroll = document.querySelectorAll('[data-testid="tweet"]').length;
     
-    // Scroll down gradually
-    const scrollAmount = window.innerHeight * 2;
-    window.scrollBy({
-      top: scrollAmount,
-      behavior: 'smooth'
-    });
-    
-    // Wait for new content to load
+    window.scrollBy({ top: window.innerHeight * 2, behavior: 'smooth' });
     await new Promise(resolve => setTimeout(resolve, 3000));
     
-    const afterScroll = document.querySelectorAll('[data-testid="tweet"]').length;
-    const newTweets = afterScroll - beforeScroll;
+    const newTweets = document.querySelectorAll('[data-testid="tweet"]').length - beforeScroll;
+    console.log(`📊 Loaded ${newTweets} new tweets.`);
     
-    console.log(`📊 Loaded ${newTweets} new tweets (${beforeScroll} -> ${afterScroll} total)`);
-    
-    // If we didn't get new tweets, try scrolling more
     if (newTweets === 0) {
-      console.log('⚠️ No new tweets loaded, trying harder scroll...');
-      window.scrollTo({
-        top: document.body.scrollHeight,
-        behavior: 'smooth'
-      });
+      console.log('⚠️ No new tweets loaded, trying a harder scroll...');
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
   }
+
 }
 
 if (window.location.hostname === 'x.com' || window.location.hostname === 'twitter.com') {
