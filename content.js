@@ -16,11 +16,16 @@ class TwitterAIReplyGuy {
     this.machineGunStats = null;
     this.startTime = null;
     this.statsInterval = null;
+    this.currentUsername = null; // Store current user's username
+    this.lastScrollPosition = 0;
+    this.scrollAttempts = 0;
+    this.maxScrollAttempts = 5;
     this.init();
   }
 
   async init() {
     await this.loadApiKeys();
+    await this.detectCurrentUsername();
     this.observeTimeline();
     this.injectButtons();
     this.createMachineGunButton();
@@ -34,6 +39,46 @@ class TwitterAIReplyGuy {
         resolve();
       });
     });
+  }
+
+  async detectCurrentUsername() {
+    try {
+      // Method 1: Look for profile navigation link
+      const profileLink = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
+      if (profileLink) {
+        const href = profileLink.getAttribute('href');
+        if (href && href.startsWith('/')) {
+          this.currentUsername = href.slice(1); // Remove leading slash
+          console.log('✅ Detected current username:', this.currentUsername);
+          return;
+        }
+      }
+
+      // Method 2: Look for user avatar in sidebar
+      const userButton = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
+      if (userButton) {
+        const usernameElement = userButton.querySelector('span');
+        if (usernameElement && usernameElement.textContent.startsWith('@')) {
+          this.currentUsername = usernameElement.textContent.slice(1); // Remove @
+          console.log('✅ Detected current username from sidebar:', this.currentUsername);
+          return;
+        }
+      }
+
+      // Method 3: Check URL if on profile page
+      if (window.location.pathname.length > 1) {
+        const pathParts = window.location.pathname.split('/');
+        if (pathParts.length >= 2 && pathParts[1] && !pathParts[1].includes('status')) {
+          this.currentUsername = pathParts[1];
+          console.log('✅ Detected current username from URL:', this.currentUsername);
+          return;
+        }
+      }
+
+      console.warn('⚠️ Could not detect current username');
+    } catch (error) {
+      console.error('Error detecting username:', error);
+    }
   }
 
   observeTimeline() {
@@ -384,7 +429,6 @@ class TwitterAIReplyGuy {
 
     try {
       const replyButton = this.findReplyButton(tweetElement);
-      
       if (!replyButton) {
         throw new Error('Could not find reply button for this tweet');
       }
@@ -393,14 +437,18 @@ class TwitterAIReplyGuy {
       console.log('Clicking reply button...');
       replyButton.click();
 
-      // Wait for the compose modal to appear and then insert the text
-      await this.waitForComposeModalAndInsertText(replyText, tweetElement);
-      console.log('AI reply successfully inserted into the correct compose box!');
+      // NEW: Wait for the modal and insert text within its context
+      const composeEditor = await this.waitForAndGetComposeEditor();
+      
+      console.log('AI reply successfully inserting into the correct compose box...');
+      this.insertTextIntoComposeBox(composeEditor, replyText);
 
       // If in machine gun mode, automatically submit the reply
       if (this.machineGunMode) {
         console.log('Machine gun mode: automatically submitting reply...');
-        await this.submitReply();
+        // Pass the modal context to the submit function
+        const replyModal = composeEditor.closest('[role="dialog"]');
+        await this.submitReply(replyModal);
       }
 
     } catch (error) {
@@ -413,98 +461,30 @@ class TwitterAIReplyGuy {
     }
   }
 
-  async submitReply() {
-    // Wait 1 second after pasting as requested
-    console.log('Waiting 1 second after pasting before clicking Reply...');
+  async submitReply(replyModal) { // Accepts the modal as context
+    console.log('Waiting 1 second before clicking Reply...');
     await new Promise(resolve => setTimeout(resolve, 1000));
     
     return new Promise((resolve, reject) => {
-      let attempts = 0;
-      const maxAttempts = 10; // 1 second with 100ms intervals
-      
-      const findAndClickReplyButton = () => {
-        attempts++;
-        console.log(`Attempt ${attempts}: Looking for Reply button...`);
+      if (!replyModal) {
+        return reject(new Error("Cannot submit reply: the reply modal context was lost."));
+      }
+
+      // Search for the submit button ONLY within the specific reply modal
+      const submitButton = replyModal.querySelector('button[data-testid="tweetButton"]');
+
+      if (submitButton && !submitButton.disabled) {
+        console.log('✅ Found submit button inside the modal, clicking...');
+        submitButton.click();
         
-        // Strategy 1: Find button by data-testid="tweetButton" that contains "Reply" text
-        const tweetButtons = document.querySelectorAll('button[data-testid="tweetButton"]');
-        let replyButton = null;
-        
-        for (const button of tweetButtons) {
-          if (button.textContent.includes('Reply')) {
-            replyButton = button;
-            console.log('Found Reply button by data-testid="tweetButton"');
-            break;
-          }
-        }
-        
-        // Strategy 2: Find button with the exact class structure
-        if (!replyButton) {
-          const buttons = document.querySelectorAll('button.css-175oi2r.r-sdzlij.r-1phboty.r-rs99b7.r-lrvibr.r-1cwvpvk.r-2yi16.r-1qi8awa.r-3pj75a.r-1loqt21.r-o7ynqc.r-6416eg.r-1ny4l3l');
-          for (const button of buttons) {
-            if (button.textContent.includes('Reply')) {
-              replyButton = button;
-              console.log('Found Reply button by exact class match');
-              break;
-            }
-          }
-        }
-        
-        // Strategy 3: Find any button containing "Reply" text
-        if (!replyButton) {
-          const allButtons = document.querySelectorAll('button');
-          for (const button of allButtons) {
-            if (button.textContent.trim() === 'Reply') {
-              replyButton = button;
-              console.log('Found Reply button by text content');
-              break;
-            }
-          }
-        }
-        
-        // Strategy 4: Find button containing the specific span structure
-        if (!replyButton) {
-          const replySpans = document.querySelectorAll('span.css-1jxf684.r-bcqeeo.r-1ttztb7.r-qvutc0.r-poiln3');
-          for (const span of replySpans) {
-            if (span.textContent.trim() === 'Reply') {
-              // Walk up to find the button
-              let parent = span.parentElement;
-              while (parent && parent !== document.body) {
-                if (parent.tagName === 'BUTTON') {
-                  replyButton = parent;
-                  console.log('Found Reply button by walking up from span');
-                  break;
-                }
-                parent = parent.parentElement;
-              }
-              if (replyButton) break;
-            }
-          }
-        }
-        
-        if (replyButton) {
-          console.log('Found reply submit button, clicking...');
-          replyButton.click();
-          
-          console.log('Reply submitted successfully!');
+        setTimeout(() => {
+          console.log('Reply submitted.');
           resolve();
-          return;
-        }
-        
-        if (attempts >= maxAttempts) {
-          console.log('Could not find reply submit button within timeout');
-          console.log('Available buttons:', document.querySelectorAll('button').length);
-          console.log('Buttons with tweetButton testid:', document.querySelectorAll('button[data-testid="tweetButton"]').length);
-          reject(new Error('Reply submit button not found'));
-          return;
-        }
-        
-        // Wait and try again
-        setTimeout(findAndClickReplyButton, 100);
-      };
-      
-      // Start searching for the reply button
-      findAndClickReplyButton();
+        }, 500); // Give it a moment to process the click
+      } else {
+        console.error('Could not find the submit button inside the reply modal or it was disabled.');
+        reject(new Error('Reply submit button not found inside the modal.'));
+      }
     });
   }
 
@@ -550,75 +530,42 @@ class TwitterAIReplyGuy {
     return null;
   }
 
-  async waitForComposeModalAndInsertText(replyText, tweetElement) {
+  async waitForAndGetComposeEditor() {
     return new Promise((resolve, reject) => {
       let attempts = 0;
-      const maxAttempts = 50; // 5 seconds timeout
-      
+      const maxAttempts = 50; // 5-second timeout
+
       const interval = setInterval(() => {
-        console.log(`Attempt ${attempts + 1}: Looking for reply compose editor...`);
-        
-        // Strategy 1: Look for the editor directly by data-testid (most reliable)
-        let editor = document.querySelector('[data-testid="tweetTextarea_0"]');
-        
-        if (!editor) {
-          // Strategy 2: Look for editor within any dialog
-          const dialogs = document.querySelectorAll('[role="dialog"]');
-          for (const dialog of dialogs) {
-            editor = dialog.querySelector('[data-testid="tweetTextarea_0"]');
-            if (editor) {
-              console.log('Found editor in dialog');
-              break;
-            }
-          }
-        }
-        
-        if (!editor) {
-          // Strategy 3: Look for editor within rich text input container
-          const container = document.querySelector('[data-testid="tweetTextarea_0RichTextInputContainer"]');
-          if (container) {
-            editor = container.querySelector('[data-testid="tweetTextarea_0"]');
-            if (editor) {
-              console.log('Found editor in rich text container');
-            }
-          }
-        }
-        
-        if (!editor) {
-          // Strategy 4: Look for any contenteditable element that looks like a tweet compose box
-          const contentEditables = document.querySelectorAll('[contenteditable="true"]');
-          for (const el of contentEditables) {
-            if (el.getAttribute('aria-label') && el.getAttribute('aria-label').toLowerCase().includes('post')) {
-              editor = el;
-              console.log('Found editor by aria-label');
-              break;
-            }
-          }
-        }
-        
-        if (editor) {
-          console.log('Found compose editor, inserting text...');
-          console.log('Editor element:', editor);
-          clearInterval(interval);
-          
-          try {
-            this.insertTextIntoComposeBox(editor, replyText);
-            console.log('Text insertion completed successfully');
-            resolve();
-          } catch (error) {
-            console.error('Error during text insertion:', error);
-            reject(error);
-          }
-          return;
-        }
-        
         attempts++;
+        console.log(`Attempt ${attempts}: Looking for reply modal...`);
+
+        // X/Twitter renders modals in a div with id="layers".
+        // This is the key to differentiating from the main compose box.
+        const layersContainer = document.getElementById('layers');
+        if (!layersContainer) {
+            if (attempts >= maxAttempts) {
+                clearInterval(interval);
+                reject(new Error('Could not find the #layers container for modals.'));
+            }
+            return;
+        }
+
+        // Within the layers, find the dialog that has appeared.
+        const replyModal = layersContainer.querySelector('[role="dialog"]');
+        if (replyModal) {
+          // Now, search for the editor *only inside this modal*.
+          const editor = replyModal.querySelector('[data-testid="tweetTextarea_0"]');
+          if (editor) {
+            console.log('✅ Found reply modal and its editor.');
+            clearInterval(interval);
+            resolve(editor);
+            return;
+          }
+        }
+
         if (attempts >= maxAttempts) {
           clearInterval(interval);
-          console.error('Failed to find reply compose editor after', maxAttempts, 'attempts');
-          console.log('Available dialogs:', document.querySelectorAll('[role="dialog"]').length);
-          console.log('Available contenteditable elements:', document.querySelectorAll('[contenteditable="true"]').length);
-          reject(new Error('Reply compose modal did not appear or editor not found.'));
+          reject(new Error('Reply compose modal did not appear or editor not found within it.'));
         }
       }, 100);
     });
@@ -850,11 +797,29 @@ class TwitterAIReplyGuy {
     stats.style.display = 'none'; // Initially hidden
     stats.innerHTML = `
       <div><strong>🔫 Machine Gun Stats</strong></div>
+      <div>User: <span id="mg-username">Unknown</span></div>
       <div>Processed: <span id="mg-processed">0</span>/${this.maxTweetsPerSession}</div>
       <div>Queue: <span id="mg-queue">0</span></div>
       <div>Runtime: <span id="mg-runtime">00:00</span></div>
+      <div>Scroll: <span id="mg-scroll">0</span>/${this.maxScrollAttempts}</div>
       <div>Rate: <span id="mg-rate">${this.rateLimitDelay/1000}s</span>/tweet</div>
     `;
+    
+    // Style the stats display
+    Object.assign(stats.style, {
+      position: 'fixed',
+      top: '80px',
+      right: '20px',
+      zIndex: '9999',
+      background: 'rgba(0,0,0,0.8)',
+      color: 'white',
+      padding: '12px',
+      borderRadius: '8px',
+      fontSize: '12px',
+      fontFamily: 'monospace',
+      minWidth: '200px',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
+    });
     
     document.body.appendChild(stats);
     this.machineGunStats = stats;
@@ -895,12 +860,112 @@ class TwitterAIReplyGuy {
     style.textContent = `
       @keyframes pulse {
         0% { transform: scale(1); }
-        50% { transform: scale(1.05); }
+        50% { transform: scale(1.02); }
         100% { transform: scale(1); }
       }
+      
+      @keyframes glow {
+        0% { box-shadow: 0 0 5px rgba(29, 155, 240, 0.3); }
+        50% { box-shadow: 0 0 20px rgba(29, 155, 240, 0.6); }
+        100% { box-shadow: 0 0 5px rgba(29, 155, 240, 0.3); }
+      }
+      
+      @keyframes success-flash {
+        0% { background-color: rgba(0, 186, 124, 0.1); }
+        50% { background-color: rgba(0, 186, 124, 0.3); }
+        100% { background-color: rgba(0, 186, 124, 0.1); }
+      }
+      
+      @keyframes error-flash {
+        0% { background-color: rgba(244, 33, 46, 0.1); }
+        50% { background-color: rgba(244, 33, 46, 0.3); }
+        100% { background-color: rgba(244, 33, 46, 0.1); }
+      }
+      
+      /* Currently being processed tweet */
       .machine-gun-processing {
+        animation: pulse 2s infinite, glow 2s infinite;
+        border: 2px solid rgba(29, 155, 240, 0.5) !important;
+        border-radius: 12px !important;
+        background-color: rgba(29, 155, 240, 0.05) !important;
+        position: relative;
+        z-index: 10;
+      }
+      
+      /* Add processing indicator */
+      .machine-gun-processing::before {
+        content: "🔫 PROCESSING...";
+        position: absolute;
+        top: -25px;
+        left: 10px;
+        background: rgba(29, 155, 240, 0.9);
+        color: white;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: bold;
+        z-index: 1000;
         animation: pulse 1s infinite;
-        opacity: 0.7;
+      }
+      
+      /* Successfully processed tweet */
+      .machine-gun-completed {
+        animation: success-flash 1s ease-out;
+        border: 2px solid rgba(0, 186, 124, 0.4) !important;
+        border-radius: 12px !important;
+        background-color: rgba(0, 186, 124, 0.05) !important;
+        position: relative;
+      }
+      
+      /* Add success indicator */
+      .machine-gun-completed::before {
+        content: "✅ COMPLETED";
+        position: absolute;
+        top: -25px;
+        left: 10px;
+        background: rgba(0, 186, 124, 0.9);
+        color: white;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: bold;
+        z-index: 1000;
+        opacity: 0.8;
+      }
+      
+      /* Failed to process tweet */
+      .machine-gun-failed {
+        animation: error-flash 1s ease-out;
+        border: 2px solid rgba(244, 33, 46, 0.4) !important;
+        border-radius: 12px !important;
+        background-color: rgba(244, 33, 46, 0.05) !important;
+        position: relative;
+      }
+      
+      /* Add error indicator */
+      .machine-gun-failed::before {
+        content: "❌ FAILED";
+        position: absolute;
+        top: -25px;
+        left: 10px;
+        background: rgba(244, 33, 46, 0.9);
+        color: white;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: bold;
+        z-index: 1000;
+        opacity: 0.8;
+      }
+      
+      /* Clean up indicators after some time */
+      .machine-gun-completed::before,
+      .machine-gun-failed::before {
+        animation: fadeOut 3s ease-out 2s forwards;
+      }
+      
+      @keyframes fadeOut {
+        to { opacity: 0; }
       }
     `;
     document.head.appendChild(style);
@@ -921,6 +986,11 @@ class TwitterAIReplyGuy {
     this.machineGunQueue = [];
     this.machineGunProcessedTweets.clear(); // Clear only Machine Gun processed tweets
     this.startTime = Date.now();
+    this.scrollAttempts = 0;
+    this.lastScrollPosition = 0;
+    
+    // Re-detect username in case user switched accounts
+    await this.detectCurrentUsername();
     
     console.log('📋 Cleared Machine Gun processed tweets set and reset counters');
     console.log(`📋 Keeping ${this.processedTweets.size} tweets with AI buttons`);
@@ -979,6 +1049,7 @@ class TwitterAIReplyGuy {
     console.log(`🔍 Found ${tweets.length} tweets to evaluate for machine gun mode`);
     console.log(`📋 Tweets with AI buttons: ${this.processedTweets.size}`);
     console.log(`📋 Machine Gun processed tweets: ${this.machineGunProcessedTweets.size}`);
+    console.log(`👤 Current username: ${this.currentUsername || 'UNKNOWN'}`);
     
     let addedCount = 0;
     let skippedCount = 0;
@@ -1008,6 +1079,20 @@ class TwitterAIReplyGuy {
         skippedCount++;
         return;
       }
+
+      // NEW: Skip tweets from current user (our own tweets/replies)
+      if (this.isOwnTweet(tweet)) {
+        console.log(`  ⚠️ Tweet ${tweetId} is from current user, skipping`);
+        skippedCount++;
+        return;
+      }
+
+      // NEW: Skip promotional/sponsored tweets
+      if (this.isPromotedTweet(tweet)) {
+        console.log(`  ⚠️ Tweet ${tweetId} is promoted/sponsored, skipping`);
+        skippedCount++;
+        return;
+      }
       
       const tweetUrl = this.extractTweetUrl(tweet);
       console.log(`  - Tweet URL: ${tweetUrl || 'NO_URL'}`);
@@ -1031,6 +1116,82 @@ class TwitterAIReplyGuy {
     });
     
     console.log(`📋 Queue population complete: ${addedCount} added, ${skippedCount} skipped. Total in queue: ${this.machineGunQueue.length}`);
+  }
+
+  isOwnTweet(tweetElement) {
+    if (!this.currentUsername) {
+      return false; // If we don't know our username, allow all tweets
+    }
+
+    try {
+      // Method 1: Check username in tweet author link
+      const authorLinks = tweetElement.querySelectorAll('a[href^="/"]');
+      for (const link of authorLinks) {
+        const href = link.getAttribute('href');
+        if (href && href.includes(`/${this.currentUsername}`)) {
+          // Make sure it's not just a mention but actually the author
+          const linkParent = link.closest('[data-testid="User-Name"], [data-testid="User-Names"]');
+          if (linkParent) {
+            console.log(`🚫 Found own tweet by author link: ${href}`);
+            return true;
+          }
+        }
+      }
+
+      // Method 2: Check for "You" indicator in user name area
+      const userNameArea = tweetElement.querySelector('[data-testid="User-Name"], [data-testid="User-Names"]');
+      if (userNameArea && userNameArea.textContent.includes('You')) {
+        console.log(`🚫 Found own tweet by "You" indicator`);
+        return true;
+      }
+
+      // Method 3: Check username text content
+      const usernameElements = tweetElement.querySelectorAll('span');
+      for (const span of usernameElements) {
+        const text = span.textContent.trim();
+        if (text === `@${this.currentUsername}`) {
+          console.log(`🚫 Found own tweet by username text: ${text}`);
+          return true;
+        }
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Error checking if own tweet:', error);
+      return false; // If error, assume it's not our tweet
+    }
+  }
+
+  isPromotedTweet(tweetElement) {
+    try {
+      // Check for promoted tweet indicators
+      const promotedIndicators = [
+        'Promoted',
+        'Sponsored',
+        'Ad',
+        'Advertisement'
+      ];
+
+      const textContent = tweetElement.textContent.toLowerCase();
+      for (const indicator of promotedIndicators) {
+        if (textContent.includes(indicator.toLowerCase())) {
+          console.log(`🚫 Found promoted tweet with indicator: ${indicator}`);
+          return true;
+        }
+      }
+
+      // Check for specific promoted tweet elements
+      const promotedElement = tweetElement.querySelector('[data-testid="socialContext"]');
+      if (promotedElement && promotedElement.textContent.toLowerCase().includes('promoted')) {
+        console.log(`🚫 Found promoted tweet by social context`);
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Error checking if promoted tweet:', error);
+      return false;
+    }
   }
 
   async processMachineGunQueue() {
@@ -1057,9 +1218,41 @@ class TwitterAIReplyGuy {
       
       // If still empty after repopulation, scroll for more
       if (this.machineGunQueue.length === 0) {
-        console.log('📋 Queue still empty after repopulation, scrolling for more tweets...');
-        await this.scrollForMoreTweets();
-        this.populateQueue();
+        console.log('📋 Queue still empty after repopulation, initiating virtual scroll...');
+        
+        // Try scrolling multiple times with different strategies
+        let scrollAttempts = 0;
+        const maxScrollAttempts = 3;
+        
+        while (scrollAttempts < maxScrollAttempts && this.machineGunQueue.length === 0) {
+          scrollAttempts++;
+          console.log(`📜 Scroll attempt ${scrollAttempts}/${maxScrollAttempts}`);
+          
+          const scrollSuccess = await this.scrollForMoreTweets();
+          
+          if (scrollSuccess) {
+            // Wait for virtual list to update
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            this.populateQueue();
+            
+            if (this.machineGunQueue.length > 0) {
+              console.log(`✅ Scroll successful - queue now has ${this.machineGunQueue.length} tweets`);
+              break;
+            }
+          }
+          
+          // If first scroll didn't work, try more aggressive scrolling
+          if (scrollAttempts === 1 && this.machineGunQueue.length === 0) {
+            console.log('🚀 Trying more aggressive scroll...');
+            await this.aggressiveScroll();
+            await new Promise(resolve => setTimeout(resolve, 2500));
+            this.populateQueue();
+          }
+        }
+        
+        if (this.machineGunQueue.length === 0) {
+          console.log('⚠️ All scroll attempts failed - might be at end of timeline');
+        }
       }
       return;
     }
@@ -1073,7 +1266,9 @@ class TwitterAIReplyGuy {
     
     try {
       console.log(`🎯 Processing tweet ${this.processedInSession + 1}/${this.maxTweetsPerSession}: ${nextTweet.tweetId}`);
-      nextTweet.tweetElement.classList.add('machine-gun-processing');
+      
+      // Scroll to and highlight the tweet being processed
+      await this.scrollToAndHighlightTweet(nextTweet.tweetElement, nextTweet.tweetId);
       
       await this.handleAIButtonClick(nextTweet.tweetUrl, nextTweet.tweetElement);
       
@@ -1081,14 +1276,144 @@ class TwitterAIReplyGuy {
       this.machineGunProcessedTweets.add(nextTweet.tweetId);
       console.log(`✅ Successfully processed tweet ${nextTweet.tweetId}`);
       
+      // Mark as completed visually
+      nextTweet.tweetElement.classList.add('machine-gun-completed');
+      
+      // Schedule cleanup of visual indicators
+      this.scheduleIndicatorCleanup(nextTweet.tweetElement);
+      
     } catch (error) {
       console.error(`❌ Error processing tweet ${nextTweet.tweetId}:`, error);
+      // Mark as failed visually
+      nextTweet.tweetElement.classList.add('machine-gun-failed');
+      
+      // Schedule cleanup of visual indicators
+      this.scheduleIndicatorCleanup(nextTweet.tweetElement);
+      
       // Still mark as processed to avoid retrying
       this.machineGunProcessedTweets.add(nextTweet.tweetId);
     } finally {
       nextTweet.tweetElement.classList.remove('machine-gun-processing');
       this.isProcessing = false;
     }
+  }
+
+  async scrollToAndHighlightTweet(tweetElement, tweetId) {
+    console.log(`👁️ Scrolling to and highlighting tweet: ${tweetId}`);
+    
+    try {
+      // Clear any previous highlights
+      document.querySelectorAll('.machine-gun-processing, .machine-gun-completed, .machine-gun-failed')
+        .forEach(el => {
+          el.classList.remove('machine-gun-processing', 'machine-gun-completed', 'machine-gun-failed');
+        });
+      
+      // Add processing class for visual feedback
+      tweetElement.classList.add('machine-gun-processing');
+      
+      // Get tweet position
+      const tweetRect = tweetElement.getBoundingClientRect();
+      const windowHeight = window.innerHeight;
+      
+      // Check if tweet is already in viewport (center area)
+      const isInViewport = tweetRect.top >= windowHeight * 0.2 && 
+                          tweetRect.bottom <= windowHeight * 0.8;
+      
+      if (!isInViewport) {
+        console.log(`📍 Tweet not in optimal view, scrolling to center it`);
+        
+        // Calculate scroll position to center the tweet
+        const tweetCenter = tweetRect.top + window.pageYOffset + (tweetRect.height / 2);
+        const targetScrollPosition = tweetCenter - (windowHeight / 2);
+        
+        // Smooth scroll to center the tweet
+        window.scrollTo({
+          top: Math.max(0, targetScrollPosition),
+          behavior: 'smooth'
+        });
+        
+        // Wait for scroll animation to complete
+        await new Promise(resolve => setTimeout(resolve, 800));
+        
+        console.log(`✅ Scrolled to center tweet ${tweetId}`);
+      } else {
+        console.log(`👁️ Tweet ${tweetId} already in optimal viewport`);
+      }
+      
+      // Add a brief highlight pulse effect
+      await this.pulseHighlight(tweetElement);
+      
+    } catch (error) {
+      console.error('Error scrolling to tweet:', error);
+    }
+  }
+
+  async pulseHighlight(tweetElement) {
+    // Add pulse effect by temporarily modifying styles
+    const originalTransition = tweetElement.style.transition;
+    const originalTransform = tweetElement.style.transform;
+    
+    try {
+      // Add smooth transition
+      tweetElement.style.transition = 'transform 0.3s ease-in-out, box-shadow 0.3s ease-in-out';
+      
+      // First pulse - scale up slightly
+      tweetElement.style.transform = 'scale(1.02)';
+      tweetElement.style.boxShadow = '0 0 20px rgba(29, 155, 240, 0.5)';
+      
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Return to normal size
+      tweetElement.style.transform = 'scale(1)';
+      tweetElement.style.boxShadow = '0 0 10px rgba(29, 155, 240, 0.3)';
+      
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+    } finally {
+      // Restore original styles after pulse
+      setTimeout(() => {
+        tweetElement.style.transition = originalTransition;
+        tweetElement.style.transform = originalTransform;
+        tweetElement.style.boxShadow = '';
+      }, 100);
+    }
+  }
+
+  scheduleIndicatorCleanup(tweetElement) {
+    // Clean up visual indicators after 10 seconds to keep timeline clean
+    setTimeout(() => {
+      if (tweetElement && document.body.contains(tweetElement)) {
+        tweetElement.classList.remove('machine-gun-completed', 'machine-gun-failed');
+        // Reset any custom styles
+        tweetElement.style.border = '';
+        tweetElement.style.borderRadius = '';
+        tweetElement.style.backgroundColor = '';
+        console.log('🧹 Cleaned up visual indicators for processed tweet');
+      }
+    }, 10000); // 10 seconds
+  }
+
+  async aggressiveScroll() {
+    console.log('🚀 Starting aggressive scroll for virtual list...');
+    
+    // Rapid sequential scrolls to trigger virtual list loading
+    for (let i = 0; i < 5; i++) {
+      console.log(`📜 Aggressive scroll ${i + 1}/5`);
+      
+      window.scrollBy({
+        top: window.innerHeight * 1.2,
+        behavior: 'auto' // Immediate scroll
+      });
+      
+      // Shorter wait between scrolls
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    
+    // Send additional events to trigger virtual list updates
+    window.dispatchEvent(new Event('scroll'));
+    window.dispatchEvent(new Event('resize'));
+    
+    console.log('🚀 Aggressive scroll completed');
   }
 
   updateStats() {
@@ -1098,26 +1423,174 @@ class TwitterAIReplyGuy {
     const minutes = Math.floor(runtime / 60000);
     const seconds = Math.floor((runtime % 60000) / 1000);
     
-    document.getElementById('mg-processed').textContent = this.processedInSession;
-    document.getElementById('mg-queue').textContent = this.machineGunQueue.length;
-    document.getElementById('mg-runtime').textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    const usernameElement = document.getElementById('mg-username');
+    if (usernameElement) {
+      usernameElement.textContent = this.currentUsername || 'Unknown';
+    }
+    
+    const processedElement = document.getElementById('mg-processed');
+    if (processedElement) {
+      processedElement.textContent = this.processedInSession;
+    }
+    
+    const queueElement = document.getElementById('mg-queue');
+    if (queueElement) {
+      queueElement.textContent = this.machineGunQueue.length;
+    }
+    
+    const runtimeElement = document.getElementById('mg-runtime');
+    if (runtimeElement) {
+      runtimeElement.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    
+    const scrollElement = document.getElementById('mg-scroll');
+    if (scrollElement) {
+      scrollElement.textContent = this.scrollAttempts;
+    }
   }
 
   async scrollForMoreTweets() {
-    console.log('📜 Scrolling for more tweets...');
+    console.log('📜 Scrolling for more tweets using virtual scrolling strategy...');
+    
     const beforeScroll = document.querySelectorAll('[data-testid="tweet"]').length;
+    console.log(`📊 Tweets before scroll: ${beforeScroll}`);
     
-    window.scrollBy({ top: window.innerHeight * 2, behavior: 'smooth' });
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    const newTweets = document.querySelectorAll('[data-testid="tweet"]').length - beforeScroll;
-    console.log(`📊 Loaded ${newTweets} new tweets.`);
-    
-    if (newTweets === 0) {
-      console.log('⚠️ No new tweets loaded, trying a harder scroll...');
-      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-      await new Promise(resolve => setTimeout(resolve, 2000));
+    // Find the actual scrollable timeline container
+    const timelineContainer = await this.findScrollableTimeline();
+    if (!timelineContainer) {
+      console.error('❌ Could not find scrollable timeline container');
+      return false;
     }
+    
+    console.log('✅ Found timeline container:', timelineContainer);
+    
+    // Virtual scrolling strategy - smooth continuous scroll
+    const scrollSuccess = await this.performVirtualScroll(timelineContainer);
+    
+    // Wait for new content to render
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    const afterScroll = document.querySelectorAll('[data-testid="tweet"]').length;
+    const newTweets = afterScroll - beforeScroll;
+    
+    console.log(`📊 Tweets after scroll: ${afterScroll}`);
+    console.log(`📊 New tweets loaded: ${newTweets}`);
+    
+    if (newTweets > 0) {
+      console.log('✅ Virtual scroll successful - new tweets loaded');
+      return true;
+    } else {
+      console.log('⚠️ No new tweets loaded - might be at end or need different strategy');
+      return false;
+    }
+  }
+
+  async findScrollableTimeline() {
+    // Strategy 1: Find primary column with timeline
+    let container = document.querySelector('[data-testid="primaryColumn"]');
+    if (container) {
+      console.log('📍 Found primaryColumn container');
+      
+      // Look for the scrollable timeline inside it
+      const timeline = container.querySelector('[aria-label*="timeline"], [aria-label*="Timeline"]');
+      if (timeline) {
+        console.log('📍 Found timeline with aria-label');
+        return timeline;
+      }
+      
+      // Look for main scrollable area
+      const scrollable = container.querySelector('[style*="overflow"], .css-175oi2r[style*="scroll"]');
+      if (scrollable) {
+        console.log('📍 Found scrollable element in primaryColumn');
+        return scrollable;
+      }
+      
+      return container; // Use primary column itself as fallback
+    }
+    
+    // Strategy 2: Find main role container
+    container = document.querySelector('main[role="main"]');
+    if (container) {
+      console.log('📍 Found main role container');
+      return container;
+    }
+    
+    // Strategy 3: Look for timeline by aria-label
+    container = document.querySelector('[aria-label*="timeline"], [aria-label*="Timeline"]');
+    if (container) {
+      console.log('📍 Found container by timeline aria-label');
+      return container;
+    }
+    
+    // Strategy 4: Fallback to body
+    console.log('📍 Using document.body as fallback');
+    return document.body;
+  }
+
+  async performVirtualScroll(container) {
+    console.log('🎯 Starting virtual scroll sequence...');
+    
+    let totalScrolled = 0;
+    let attempts = 0;
+    const maxAttempts = 8;
+    
+    while (attempts < maxAttempts) {
+      attempts++;
+      console.log(`📜 Virtual scroll attempt ${attempts}/${maxAttempts}`);
+      
+      const startPosition = window.pageYOffset;
+      const containerHeight = container.scrollHeight || document.body.scrollHeight;
+      
+      // Calculate scroll distance - use smaller increments for virtual scrolling
+      const scrollDistance = Math.min(
+        window.innerHeight * 0.8, // Smaller scroll distance
+        containerHeight * 0.1      // Or 10% of container height
+      );
+      
+      console.log(`📊 Scrolling ${scrollDistance}px from position ${startPosition}`);
+      
+      // Perform smooth scroll
+      window.scrollBy({
+        top: scrollDistance,
+        behavior: 'smooth'
+      });
+      
+      // Wait for scroll animation and virtual list update
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      const endPosition = window.pageYOffset;
+      const actualScrolled = endPosition - startPosition;
+      totalScrolled += actualScrolled;
+      
+      console.log(`📊 Actually scrolled: ${actualScrolled}px, Total: ${totalScrolled}px`);
+      
+      // Check if we actually scrolled (not at bottom)
+      if (actualScrolled < 50) {
+        console.log('⚠️ Minimal scroll movement - might be at bottom');
+        break;
+      }
+      
+      // Check if new tweets appeared during this scroll
+      const currentTweets = document.querySelectorAll('[data-testid="tweet"]').length;
+      if (currentTweets > 0) {
+        console.log(`✅ Virtual scroll working - ${currentTweets} tweets visible`);
+        
+        // Continue scrolling to load more, but with smaller delays
+        await new Promise(resolve => setTimeout(resolve, 800));
+      }
+      
+      // If we've scrolled a substantial amount, that's probably enough
+      if (totalScrolled > window.innerHeight * 3) {
+        console.log('✅ Substantial scroll completed');
+        break;
+      }
+    }
+    
+    // Final wait for any pending virtual list updates
+    console.log('⏳ Final wait for virtual list to update...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    return totalScrolled > 100; // Success if we scrolled at least 100px
   }
 
 }
